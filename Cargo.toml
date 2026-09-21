@@ -7,7 +7,7 @@ description = "确定性任务调度原语：任务 ID 登记表 + 显式 tick �
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bytechainx/schedulex"
 homepage = "https://github.com/bytechainx/schedulex"
-documentation = "https://docs.rs/schedulex"
+documentation = "https://github.com/bytechainx/schedulex#readme"
 readme = "README.md"
 keywords = ["scheduler", "cron", "job", "task", "registry"]
 categories = ["concurrency", "development-tools"]
@@ -43,6 +43,3 @@ panic = "deny"
 unreachable = "deny"
 todo = "deny"
 unimplemented = "deny"
-
-[package.metadata.docs.rs]
-rustdoc-args = ["--cfg", "docsrs"]

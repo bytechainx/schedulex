@@ -10,8 +10,11 @@
 
 ## 安装
 
-```bash
-cargo add schedulex
+本 crate **不发布到 crates.io**，通过 git 依赖引入：
+
+```toml
+[dependencies]
+schedulex = { git = "https://github.com/bytechainx/schedulex" }
 ```
 
 ## 两个独立 interface
