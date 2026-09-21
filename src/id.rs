@@ -20,6 +20,17 @@ pub fn validate_task_id(id: &str) -> Result<(), ScheduleError> {
 }
 
 /// 规范化：trim；若结果为空则错误。
+///
+/// # Examples
+///
+/// ```
+/// use schedulex::normalize_task_id;
+///
+/// let id = normalize_task_id("  job-1  ")?;
+/// assert_eq!(id, "job-1");
+/// assert!(normalize_task_id("   ").is_err(), "全空白等价于空 ID");
+/// # Ok::<(), schedulex::ScheduleError>(())
+/// ```
 pub fn normalize_task_id(id: &str) -> Result<String, ScheduleError> {
     let t = id.trim();
     validate_task_id(t)?;
