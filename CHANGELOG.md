@@ -12,7 +12,7 @@
 
 ### 新增
 
-- 从 `xhyper.rs` 抽取为独立可发布 crate：零依赖、std-only。
+- 从 `xhyper.rs` 抽取为独立 crate：零依赖、std-only。
 - `Scheduler` 任务 ID 登记表，以及 `normalize_task_id` / `validate_task_id` /
   `is_debug_label` / `debug_label` / `MAX_ID_LEN` 等 ID 治理函数。
 - `Schedule` / `CronParsed` / `parse_cron_expr` / `cron_matches`：`Once`、`FixedDelay`
