@@ -1,0 +1,45 @@
+[package]
+name = "schedulex"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "确定性任务调度原语：任务 ID 登记表 + 显式 tick 驱动的 Job 运行器，零依赖、无墙钟"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bytechainx/schedulex"
+homepage = "https://github.com/bytechainx/schedulex"
+documentation = "https://github.com/bytechainx/schedulex#readme"
+readme = "README.md"
+keywords = ["scheduler", "cron", "job", "task", "registry"]
+categories = ["concurrency", "development-tools"]
+include = [
+    "src/**/*",
+    "tests/**/*",
+    "benches/**/*",
+    "examples/**/*",
+    "docs/**/*",
+    "README.md",
+    "LICENSE-*",
+    "Cargo.toml",
+]
+
+# std-only：无生产依赖。
+[dependencies]
+
+[dev-dependencies]
+
+[[bench]]
+name = "hot_path"
+harness = false
+
+[lints.rust]
+private_interfaces = "deny"
+private_bounds = "deny"
+unused_must_use = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
