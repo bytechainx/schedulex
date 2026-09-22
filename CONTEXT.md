@@ -31,7 +31,9 @@ _Avoid_: 轮询（tick 是调用方驱动的语义推进，不是本 crate 内�
 它**不是**真实 UTC 墙钟分钟。
 _Avoid_: 分钟（不加限定容易与真实时钟混淆）
 
-**时间回退**：本次 `now_ms` 小于上次 tick 的情形，被忽略且不推进任何状态。
+**时间回退**：本次 `now_ms` 小于上次 tick 的情形，不执行且不推进任何状态，
+但不再静默——`TickResult.clock_regressed` 置告警、`missed` 计数被跳过的到期
+Job；这些 Job 在时钟重新追上后仍按原策略触发，不会永久丢失。
 _Avoid_: 时钟漂移（本 crate 不做时间校正，只做单调性防御）
 
 **不补跑**：大跨度 tick 时每个 job 最多执行一次，跨过的间隔不会被补偿执行。
@@ -66,7 +68,8 @@ _Avoid_: 惰性校验（本 crate 不在执行期才发现非法调度）
 _Avoid_: 插入顺序（顺序由 ID 字典序决定，与注册先后无关）
 
 **TickResult**：一次 tick 的结果，含成功触发次数 `fired` 与按执行顺序排列的
-`errors`；单个 Job 返回 `Err` 不阻断后续 Job，但 Job panic 会向宿主传播。
+`errors`；单个 Job 返回 `Err` 或 panic 均不阻断后续 Job——panic 被捕获并记为
+`ScheduleError::JobPanicked`。
 _Avoid_: 执行报告（它不是持久化产物，也不含重试或重放信息）
 
 **登记表统计**（`RegistryStats`）：对登记表规模的只读快照与软阈值视图；

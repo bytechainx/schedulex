@@ -20,9 +20,10 @@ struct Entry {
 
 /// 内存 Job 运行器。
 ///
-/// 调用方注入非递减的 `now_ms`；核心不读系统时间。回退的 tick 被忽略。
-/// 同一 tick 内按 `str::cmp` 的 [`JobId`] 字典序执行；单个 Job 错误不会阻断后续 Job，
-/// 但 panic 会传播并中止当前 tick。
+/// 调用方注入非递减的 `now_ms`；核心不读系统时间。回退的 tick 不执行也不
+/// 推进基线，但通过 [`TickResult::clock_regressed`] / [`TickResult::missed`]
+/// 可观测。同一 tick 内按 `str::cmp` 的 [`JobId`] 字典序执行；单个 Job 的
+/// 错误或 panic 都不会阻断后续 Job——panic 被捕获并记为该 Job 本次失败。
 #[derive(Default)]
 pub struct JobRunner {
     entries: HashMap<String, Entry>,
@@ -98,17 +99,34 @@ impl JobRunner {
     ///
     /// 返回成功触发次数；单个 job 错误按执行顺序记入错误列表、推进触发状态，
     /// 其他 job 继续。大跨度 tick 每个 job 最多执行一次，不补跑错过的间隔。
-    /// `now_ms` 小于上次 tick 时不执行也不推进。Job panic 不捕获，当前 tick 状态不保证。
     ///
-    /// # Panics
+    /// Job callback panic 会被 `catch_unwind` 捕获，记为该 job 本次失败
+    /// （[`ScheduleError::JobPanicked`]）、推进触发状态，同 tick 后续 job 继续执行；
+    /// panic 不再中止整轮 tick。默认 panic hook 仍会向 stderr 打印噪声，
+    /// 宿主如需静默可自行安装 hook（本 crate 不做全局 hook 副作用）。
     ///
-    /// 任一 Job callback panic 时原样传播，并中止当前 tick；此前 Job 的状态可能已经推进。
+    /// `now_ms` 小于上次 tick（时钟回退，如 NTP 回拨）时不执行也不推进基线，
+    /// 但不再静默：返回的 [`TickResult`] 置 `clock_regressed = true`，并以
+    /// `missed` 计数本次因回退被跳过的到期活跃 job。被跳过的任务不会永久
+    /// 丢失——Once 等任务在时钟重新追上其触发时刻后，仍由后续 tick 按原
+    /// 策略触发（行为策略：回退期间一律不执行，可观测性先行）。
     pub fn tick(&mut self, now_ms: u64) -> TickResult {
         if self
             .last_tick_ms
             .is_some_and(|last_tick_ms| now_ms < last_tick_ms)
         {
-            return TickResult::default();
+            // 时钟回退：保持「不执行、不推进基线」的既有契约，但统计此刻
+            // 到期而被跳过的活跃 job，让回退事件对宿主可观测（告警 + 计数）。
+            let missed = self
+                .entries
+                .values()
+                .filter(|e| !e.cancelled && is_due(e, now_ms))
+                .count();
+            return TickResult {
+                clock_regressed: true,
+                missed,
+                ..TickResult::default()
+            };
         }
         self.last_tick_ms = Some(now_ms);
         let mut fired = 0usize;
@@ -132,20 +150,52 @@ impl JobRunner {
                 ));
                 continue;
             };
-            match (entry.job.run)() {
-                Ok(()) => {
+            // 隔离第三方 job 的 panic：闭包内只调用回调本身，runner 的状态
+            // （entries / last_fire 基线）不在闭包内变更——mark_fired 仅在闭包
+            // 正常返回或 panic 被捕获之后执行，因此 job 中途 panic 不会破坏
+            // 调度器不变量；这里用 AssertUnwindSafe 是安全的。job 自身捕获的
+            // 外部状态在 panic 点可能不一致，那属于宿主回调的责任边界。
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (entry.job.run)()));
+            match outcome {
+                Ok(Ok(())) => {
                     fired += 1;
                     mark_fired(entry, now_ms);
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     // 仍推进 last_fire，避免紧密循环打爆
                     mark_fired(entry, now_ms);
                     errors.push((JobId::new(id), err));
                 }
+                Err(payload) => {
+                    // panic 视为该 job 本次失败：同样推进触发状态，避免一个
+                    // 必然 panic 的 job 在每个 tick 反复炸；记入错误通道后继续。
+                    mark_fired(entry, now_ms);
+                    errors.push((
+                        JobId::new(id),
+                        ScheduleError::JobPanicked(panic_message(payload.as_ref())),
+                    ));
+                }
             }
         }
-        TickResult { fired, errors }
+        TickResult {
+            fired,
+            errors,
+            clock_regressed: false,
+            missed: 0,
+        }
     }
+}
+
+/// 从 panic payload 尽力提取人类可读信息（非字符串 payload 返回占位说明）。
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return (*text).to_string();
+    }
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    "非字符串 payload".to_string()
 }
 
 fn validate_schedule(schedule: &Schedule) -> Result<(), ScheduleError> {
@@ -181,8 +231,15 @@ impl std::fmt::Debug for JobRunner {
 pub struct TickResult {
     /// 成功执行次数。
     pub fired: usize,
-    /// 按 Job ID 执行顺序排列的失败列表。
+    /// 按 Job ID 执行顺序排列的失败列表（含被捕获的 Job panic）。
     pub errors: Vec<(JobId, ScheduleError)>,
+    /// 时钟回退告警：本次 tick 因 `now_ms` 小于上次 tick 被整体忽略
+    /// （不执行、不推进基线）。宿主应将其视为可观测告警（如 NTP 回拨）。
+    pub clock_regressed: bool,
+    /// 回退 tick 中被跳过的到期活跃 Job 数量；仅当 [`Self::clock_regressed`]
+    /// 为 `true` 时非零。这些 Job 不会永久丢失：时钟重新追上其触发时刻后，
+    /// 仍由后续 tick 按原策略触发。
+    pub missed: usize,
 }
 
 fn is_due(entry: &Entry, now_ms: u64) -> bool {
@@ -329,6 +386,72 @@ mod tests {
         assert_eq!(r.fired, 1);
         assert_eq!(r.errors.len(), 1);
         assert!(format!("{}", r.errors[0].1).contains("任务执行失败"));
+    }
+
+    #[test]
+    fn panic_job_is_contained_and_does_not_block_same_tick() {
+        let mut runner = JobRunner::new();
+        runner
+            .add(
+                Job::new("a-panic", || -> Result<(), ScheduleError> {
+                    panic!("boom")
+                }),
+                Schedule::once(0),
+            )
+            .unwrap();
+        runner
+            .add(Job::new("b-ok", || Ok(())), Schedule::once(0))
+            .unwrap();
+        // panic 被捕获：同 tick 字典序在后的 job 仍执行，panic 记为该 job 失败
+        let r = runner.tick(0);
+        assert_eq!(r.fired, 1, "b-ok 应成功执行");
+        assert_eq!(r.errors.len(), 1);
+        assert_eq!(r.errors[0].0.as_str(), "a-panic");
+        assert!(matches!(&r.errors[0].1, ScheduleError::JobPanicked(msg) if msg == "boom"));
+        // 触发状态已推进：Once 不因 panic 重跑
+        let r2 = runner.tick(1);
+        assert_eq!(r2.fired, 0);
+        assert!(r2.errors.is_empty());
+    }
+
+    #[test]
+    fn clock_regression_is_observable_and_once_not_lost() {
+        let hits = Arc::new(Mutex::new(0u32));
+        let h = Arc::clone(&hits);
+        let mut runner = JobRunner::new();
+        // 建立 tick 基线；正常 tick 不带回退告警
+        let r = runner.tick(100);
+        assert!(!r.clock_regressed);
+        assert_eq!(r.missed, 0);
+        runner
+            .add(
+                Job::new("once", move || {
+                    *h.lock().unwrap() += 1;
+                    Ok(())
+                }),
+                Schedule::once(50),
+            )
+            .unwrap();
+        // 回退 tick：不执行、不推进基线，但告警 + 计数被跳过的到期 job
+        let r = runner.tick(99);
+        assert!(r.clock_regressed, "时钟回退必须可观测");
+        assert_eq!(r.missed, 1, "到期 Once 被计数而非静默丢弃");
+        assert_eq!(r.fired, 0);
+        assert!(r.errors.is_empty());
+        assert_eq!(*hits.lock().unwrap(), 0);
+        // 时钟重新追上后任务仍按原策略触发，不永久丢失
+        let r = runner.tick(100);
+        assert!(!r.clock_regressed);
+        assert_eq!(r.fired, 1);
+        assert_eq!(r.missed, 0);
+        assert_eq!(*hits.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn panic_message_handles_non_string_payload() {
+        assert_eq!(panic_message(&"文本"), "文本");
+        assert_eq!(panic_message(&String::from("拥有型文本")), "拥有型文本");
+        assert_eq!(panic_message(&42u32), "非字符串 payload");
     }
 
     #[test]

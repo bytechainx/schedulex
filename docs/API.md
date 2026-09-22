@@ -11,7 +11,7 @@
 - `list_meta()`：包含已取消未移除条目，按 Rust `str::cmp` 的 Job ID 字典序。
 - `tick(now_ms)`：到期 Job 按 Rust `str::cmp` 的 Job ID 字典序，每个 tick 每 Job 最多一次。
 
-`now_ms` 为逻辑毫秒。小于上次 tick 的输入被忽略；大跨度 FixedDelay 不补跑。Job Err 进入有序错误列表、推进状态并继续；panic 传播且当前 tick 的部分状态不保证。
+`now_ms` 为逻辑毫秒。小于上次 tick 的输入（时钟回退）不执行也不推进基线，但会置 `TickResult.clock_regressed = true` 并以 `missed` 计数本次被跳过的到期 Job——回退事件可观测，到期任务不静默丢失（时钟追上后由后续 tick 按原策略触发）；大跨度 FixedDelay 不补跑。Job Err 进入有序错误列表、推进状态并继续；Job panic 被 `catch_unwind` 捕获、以 `ScheduleError::JobPanicked` 进入同一错误列表并推进状态，同 tick 后续 Job 继续执行（默认 panic hook 的 stderr 噪声不变，本 crate 不做全局 hook 副作用）。
 
 ## Schedule 子集
 

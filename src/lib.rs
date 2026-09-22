@@ -78,6 +78,8 @@ pub enum ScheduleError {
     InvalidSchedule(String),
     /// Job 执行失败。
     JobFailed(String),
+    /// Job 回调 panic，已被 `tick` 捕获并视为该 Job 本次失败。
+    JobPanicked(String),
 }
 
 impl std::fmt::Display for ScheduleError {
@@ -88,6 +90,7 @@ impl std::fmt::Display for ScheduleError {
             Self::IdControlChar => write!(f, "任务 ID 不能包含控制字符"),
             Self::InvalidSchedule(msg) => write!(f, "非法调度: {msg}"),
             Self::JobFailed(msg) => write!(f, "任务执行失败: {msg}"),
+            Self::JobPanicked(msg) => write!(f, "任务 panic 已捕获: {msg}"),
         }
     }
 }

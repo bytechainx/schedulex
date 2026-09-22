@@ -127,6 +127,49 @@ fn regressed_logical_time_is_ignored_without_advancing_jobs() {
 }
 
 #[test]
+fn regressed_tick_reports_warning_and_missed_without_silent_loss() {
+    let calls = Arc::new(Mutex::new(0_u32));
+    let recorded_calls = Arc::clone(&calls);
+    let mut runner = JobRunner::new();
+
+    // 基线 tick：无回退告警
+    let baseline = runner.tick(100);
+    assert!(!baseline.clock_regressed);
+    assert_eq!(baseline.missed, 0);
+
+    runner
+        .add(
+            Job::new("due-once", move || {
+                *recorded_calls.lock().expect("调用记录锁应可用") += 1;
+                Ok(())
+            }),
+            Schedule::once(50),
+        )
+        .expect("任务应合法");
+    runner
+        .add(Job::new("idle-once", || Ok(())), Schedule::once(500))
+        .expect("任务应合法");
+
+    // 回退 tick（模拟 NTP 回拨）：不执行，但必须可观测
+    let regressed = runner.tick(99);
+    assert!(regressed.clock_regressed, "回退必须置告警位");
+    assert_eq!(
+        regressed.missed, 1,
+        "仅统计到期被跳过的 job（due-once），未到期的不计"
+    );
+    assert_eq!(regressed.fired, 0);
+    assert!(regressed.errors.is_empty());
+    assert_eq!(*calls.lock().expect("调用记录锁应可用"), 0);
+
+    // 基线未被污染：tick(100) 正常触发，任务未因回退永久丢失
+    let recovered = runner.tick(100);
+    assert!(!recovered.clock_regressed);
+    assert_eq!(recovered.missed, 0);
+    assert_eq!(recovered.fired, 1);
+    assert_eq!(*calls.lock().expect("调用记录锁应可用"), 1);
+}
+
+#[test]
 fn tick_error_order_matches_execution_order_and_other_jobs_continue() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut runner = JobRunner::new();
@@ -332,7 +375,7 @@ fn cron_minute_match_keeps_u64_epoch_before_modulo() {
 }
 
 #[test]
-fn job_panic_propagates_and_stops_later_jobs_in_the_same_tick() {
+fn job_panic_is_contained_as_failure_and_later_jobs_still_run() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut runner = JobRunner::new();
 
@@ -378,14 +421,25 @@ fn job_panic_propagates_and_stops_later_jobs_in_the_same_tick() {
         )
         .expect("任务应合法");
 
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.tick(0)))
-        .expect_err("Job panic 必须传播给 tick 调用方");
-    assert_eq!(panic.downcast_ref::<&str>().copied(), Some("任务 panic"));
+    // panic 不得传播出 tick，也不得中止整轮调度：字典序在后的 job 仍执行。
+    let result = runner.tick(0);
     assert_eq!(
         *calls.lock().expect("调用记录锁应可用"),
-        vec!["a-before", "m-panic"],
-        "同 tick 中词法顺序位于 panic 之后的 job 不得执行"
+        vec!["a-before", "m-panic", "z-after"],
+        "panic 之后的 job 必须继续执行"
     );
+    assert_eq!(result.fired, 2, "两个正常 job 记为成功");
+    assert_eq!(result.errors.len(), 1, "panic 记为该 job 失败");
+    assert_eq!(result.errors[0].0.as_str(), "m-panic");
+    match &result.errors[0].1 {
+        ScheduleError::JobPanicked(message) => {
+            assert!(
+                message.contains("任务 panic"),
+                "错误应携带 panic 信息，实际为 {message:?}"
+            );
+        }
+        other => panic!("应为 JobPanicked，实际为 {other:?}"),
+    }
 }
 
 #[test]
