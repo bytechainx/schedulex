@@ -15,6 +15,9 @@
   可执行断言）、`tests/aidd_boundary.rs`（8 条经复核的 AI 生成对抗 / 边界用例）。
 - `ScheduleError::JobPanicked` 变体：Job 回调 panic 被 `tick` 捕获后的失败记录
   （枚举已是 `#[non_exhaustive]`，新增变体向后兼容）。
+- `TickResult` 新增字段 `clock_regressed: bool`（时钟回退告警）与
+  `missed: usize`（回退 tick 中被跳过的到期 Job 数）。附加字段，`Default`
+  为零值 / false，读取 `fired` / `errors` 的既有代码不受影响。
 
 ### 变更
 
@@ -23,6 +26,11 @@
   后续 Job 继续执行——单个第三方 Job 的 bug 不再中止整轮调度。默认 panic hook
   的 stderr 噪声保持不变（本 crate 不引入全局 hook 副作用）。
   迁移：依赖「panic 传播」的宿主改查 `TickResult::errors` 中的 `JobPanicked`。
+- 时钟回退（`now_ms` 小于上次 tick，如 NTP 回拨）不再静默：既有「不执行、
+  不推进基线」契约保持不变，但 `tick` 返回 `clock_regressed = true` 并计数
+  `missed`，宿主可据此告警。回退期间到期的任务不会被静默丢弃——时钟重新
+  追上其触发时刻后，仍由后续 tick 按原策略触发（行为策略：回退期间一律
+  不执行，可观测性先行）。
 
 ## [0.1.0] - 2026-09-21
 

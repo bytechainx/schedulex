@@ -47,7 +47,9 @@ fn main() -> ScheduleResult<()> {
 
 - `add` fail-closed 校验 ID 与调度表达式，非法输入不会进入运行器
 - 同一 tick 内到期、以及 metadata 输出，均按 Job ID 的 Rust `str::cmp` 字典序
-- 时间回退（`now_ms` 小于上次 tick）被忽略，不会重复触发
+- 时间回退（`now_ms` 小于上次 tick）不执行、不推进基线，不会重复触发；回退
+  通过 `TickResult::clock_regressed`（告警）与 `missed`（被跳过的到期任务数）
+  可观测，到期任务不被静默丢弃——时钟重新追上后仍按原策略触发
 - `FixedDelay` 与 `every:<ms>` 在大跨度跨越时不补跑；`every:<ms>` 首次 tick 立即执行，
   之后按上次执行时刻推进 interval
 - Job 返回 `Err` 时被记录、推进状态并继续后续 Job；Job panic 被捕获、记为该 Job
