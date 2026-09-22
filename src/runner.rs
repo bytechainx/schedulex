@@ -21,8 +21,8 @@ struct Entry {
 /// 内存 Job 运行器。
 ///
 /// 调用方注入非递减的 `now_ms`；核心不读系统时间。回退的 tick 被忽略。
-/// 同一 tick 内按 `str::cmp` 的 [`JobId`] 字典序执行；单个 Job 错误不会阻断后续 Job，
-/// 但 panic 会传播并中止当前 tick。
+/// 同一 tick 内按 `str::cmp` 的 [`JobId`] 字典序执行；单个 Job 的错误或 panic
+/// 都不会阻断后续 Job——panic 被捕获并记为该 Job 本次失败。
 #[derive(Default)]
 pub struct JobRunner {
     entries: HashMap<String, Entry>,
@@ -98,11 +98,13 @@ impl JobRunner {
     ///
     /// 返回成功触发次数；单个 job 错误按执行顺序记入错误列表、推进触发状态，
     /// 其他 job 继续。大跨度 tick 每个 job 最多执行一次，不补跑错过的间隔。
-    /// `now_ms` 小于上次 tick 时不执行也不推进。Job panic 不捕获，当前 tick 状态不保证。
     ///
-    /// # Panics
+    /// Job callback panic 会被 `catch_unwind` 捕获，记为该 job 本次失败
+    /// （[`ScheduleError::JobPanicked`]）、推进触发状态，同 tick 后续 job 继续执行；
+    /// panic 不再中止整轮 tick。默认 panic hook 仍会向 stderr 打印噪声，
+    /// 宿主如需静默可自行安装 hook（本 crate 不做全局 hook 副作用）。
     ///
-    /// 任一 Job callback panic 时原样传播，并中止当前 tick；此前 Job 的状态可能已经推进。
+    /// `now_ms` 小于上次 tick 时不执行也不推进。
     pub fn tick(&mut self, now_ms: u64) -> TickResult {
         if self
             .last_tick_ms
@@ -132,20 +134,47 @@ impl JobRunner {
                 ));
                 continue;
             };
-            match (entry.job.run)() {
-                Ok(()) => {
+            // 隔离第三方 job 的 panic：闭包内只调用回调本身，runner 的状态
+            // （entries / last_fire 基线）不在闭包内变更——mark_fired 仅在闭包
+            // 正常返回或 panic 被捕获之后执行，因此 job 中途 panic 不会破坏
+            // 调度器不变量；这里用 AssertUnwindSafe 是安全的。job 自身捕获的
+            // 外部状态在 panic 点可能不一致，那属于宿主回调的责任边界。
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (entry.job.run)()));
+            match outcome {
+                Ok(Ok(())) => {
                     fired += 1;
                     mark_fired(entry, now_ms);
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     // 仍推进 last_fire，避免紧密循环打爆
                     mark_fired(entry, now_ms);
                     errors.push((JobId::new(id), err));
+                }
+                Err(payload) => {
+                    // panic 视为该 job 本次失败：同样推进触发状态，避免一个
+                    // 必然 panic 的 job 在每个 tick 反复炸；记入错误通道后继续。
+                    mark_fired(entry, now_ms);
+                    errors.push((
+                        JobId::new(id),
+                        ScheduleError::JobPanicked(panic_message(payload.as_ref())),
+                    ));
                 }
             }
         }
         TickResult { fired, errors }
     }
+}
+
+/// 从 panic payload 尽力提取人类可读信息（非字符串 payload 返回占位说明）。
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return (*text).to_string();
+    }
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    "非字符串 payload".to_string()
 }
 
 fn validate_schedule(schedule: &Schedule) -> Result<(), ScheduleError> {
@@ -329,6 +358,39 @@ mod tests {
         assert_eq!(r.fired, 1);
         assert_eq!(r.errors.len(), 1);
         assert!(format!("{}", r.errors[0].1).contains("任务执行失败"));
+    }
+
+    #[test]
+    fn panic_job_is_contained_and_does_not_block_same_tick() {
+        let mut runner = JobRunner::new();
+        runner
+            .add(
+                Job::new("a-panic", || -> Result<(), ScheduleError> {
+                    panic!("boom")
+                }),
+                Schedule::once(0),
+            )
+            .unwrap();
+        runner
+            .add(Job::new("b-ok", || Ok(())), Schedule::once(0))
+            .unwrap();
+        // panic 被捕获：同 tick 字典序在后的 job 仍执行，panic 记为该 job 失败
+        let r = runner.tick(0);
+        assert_eq!(r.fired, 1, "b-ok 应成功执行");
+        assert_eq!(r.errors.len(), 1);
+        assert_eq!(r.errors[0].0.as_str(), "a-panic");
+        assert!(matches!(&r.errors[0].1, ScheduleError::JobPanicked(msg) if msg == "boom"));
+        // 触发状态已推进：Once 不因 panic 重跑
+        let r2 = runner.tick(1);
+        assert_eq!(r2.fired, 0);
+        assert!(r2.errors.is_empty());
+    }
+
+    #[test]
+    fn panic_message_handles_non_string_payload() {
+        assert_eq!(panic_message(&"文本"), "文本");
+        assert_eq!(panic_message(&String::from("拥有型文本")), "拥有型文本");
+        assert_eq!(panic_message(&42u32), "非字符串 payload");
     }
 
     #[test]

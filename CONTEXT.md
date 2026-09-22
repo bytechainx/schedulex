@@ -66,7 +66,8 @@ _Avoid_: 惰性校验（本 crate 不在执行期才发现非法调度）
 _Avoid_: 插入顺序（顺序由 ID 字典序决定，与注册先后无关）
 
 **TickResult**：一次 tick 的结果，含成功触发次数 `fired` 与按执行顺序排列的
-`errors`；单个 Job 返回 `Err` 不阻断后续 Job，但 Job panic 会向宿主传播。
+`errors`；单个 Job 返回 `Err` 或 panic 均不阻断后续 Job——panic 被捕获并记为
+`ScheduleError::JobPanicked`。
 _Avoid_: 执行报告（它不是持久化产物，也不含重试或重放信息）
 
 **登记表统计**（`RegistryStats`）：对登记表规模的只读快照与软阈值视图；

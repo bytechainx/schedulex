@@ -13,6 +13,16 @@
 - 特性 002：`tests/tdd_contracts.rs`（覆盖公开接口契约全部 10 个入口的行为契约 +
   TDD-PROBE 变异探测表）、`tests/sdd_spec.rs`（`docs/标准.md` 全部 4 个 `##` 章节的
   可执行断言）、`tests/aidd_boundary.rs`（8 条经复核的 AI 生成对抗 / 边界用例）。
+- `ScheduleError::JobPanicked` 变体：Job 回调 panic 被 `tick` 捕获后的失败记录
+  （枚举已是 `#[non_exhaustive]`，新增变体向后兼容）。
+
+### 变更
+
+- `JobRunner::tick` 不再向宿主传播 Job panic：panic 经 `catch_unwind` 捕获，
+  记为该 Job 本次失败（`ScheduleError::JobPanicked`）、推进触发状态，同 tick
+  后续 Job 继续执行——单个第三方 Job 的 bug 不再中止整轮调度。默认 panic hook
+  的 stderr 噪声保持不变（本 crate 不引入全局 hook 副作用）。
+  迁移：依赖「panic 传播」的宿主改查 `TickResult::errors` 中的 `JobPanicked`。
 
 ## [0.1.0] - 2026-09-21
 

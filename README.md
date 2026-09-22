@@ -50,7 +50,8 @@ fn main() -> ScheduleResult<()> {
 - 时间回退（`now_ms` 小于上次 tick）被忽略，不会重复触发
 - `FixedDelay` 与 `every:<ms>` 在大跨度跨越时不补跑；`every:<ms>` 首次 tick 立即执行，
   之后按上次执行时刻推进 interval
-- Job 返回 `Err` 时被记录、推进状态并继续后续 Job；Job panic 会向宿主传播
+- Job 返回 `Err` 时被记录、推进状态并继续后续 Job；Job panic 被捕获、记为该 Job
+  本次失败（`ScheduleError::JobPanicked`），同样推进状态并继续后续 Job
 
 ## API 摘要
 
